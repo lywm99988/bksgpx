@@ -607,6 +607,87 @@ for _, data := range results {
 // 获取总条数 - bks
 total := config.RDB.LLen(config.Ctx, key).Int()
 ```
+### CacheListRedis //1v1
+package handler
+
+import (
+	"fmt"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"log"
+	"sync"
+)
+
+// 协议升级
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+type Node struct {
+	Conn *websocket.Conn // 长连接  ws
+	Data chan []byte     // 用于传递消息
+}
+
+var onLineMap = make(map[string]*Node) // 在线用户节点映射
+var mu sync.RWMutex
+
+func Chat(c *gin.Context) {
+	formUserId := c.Query("from_user_id")
+	toUserId := c.Query("to_user_id")
+	fmt.Println(formUserId, toUserId)
+
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// 创建节点
+	node := &Node{
+		Conn: conn,
+		Data: make(chan []byte),
+	}
+
+	mu.Lock()
+	onLineMap[formUserId] = node // 加入在线用户节点映射
+	mu.Unlock()
+
+	go ReceiveMessage(node)                    // 接收消息，读我自己的chan消息，通过 ws 写给我
+	go SendMessage(node, formUserId, toUserId) // 发送消息，读我的消息放到别人的chan中
+}
+
+// 发送消息, 向指定用户发送消息
+func SendMessage(node *Node, userId, targetId string) {
+	for {
+		_, p, err := node.Conn.ReadMessage() // 读取我的消息
+		if err != nil {
+			log.Println(err)
+			// 删除在线用户.从 `onLineMap` 删除该用户
+			delete(onLineMap, userId)
+			return
+		}
+
+		if _, ok := onLineMap[targetId]; !ok {
+			log.Println("目标用户不存在")
+			return
+		}
+
+		mu.RLock()
+		onLineMap[targetId].Data <- p // 发送消息给目标用户
+		mu.RUnlock()
+	}
+}
+
+func ReceiveMessage(node *Node) {
+	for {
+		p := <-node.Data // 接收消息
+		err := node.Conn.WriteMessage(websocket.TextMessage, p)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+}
 
 ---
 
